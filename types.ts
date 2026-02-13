@@ -7,14 +7,28 @@ export interface Role {
   status: 'Exploring' | 'Open' | 'Applied' | 'Interviewing' | 'Closed';
 }
 
+export interface Team {
+  name: string;
+  focus: string;
+}
+
+export type CompanyStage = 'Startup' | 'Scaleup' | 'Corporate' | string;
+export type BusinessModel = 'SaaS' | 'B2B' | 'B2C' | 'Marketplace' | 'Fintech' | 'HealthTech' | 'AI/ML' | string;
+
 export interface Company {
   id: string;
   name: string;
   industry: string;
   description: string;
   website: string;
+  careerWebsite?: string;
   roles: Role[];
+  teams?: Team[];
   logo?: string;
+  stage?: CompanyStage;
+  valuation?: number; // In millions
+  leadInvestor?: string;
+  businessModel?: BusinessModel;
 }
 
 export interface Contact {
@@ -28,7 +42,7 @@ export interface Contact {
   lastConversationYear?: number;
   lastConversationMonth?: number;
   lastConversationDay?: number;
-  lastConversation: string; // Kept for legacy display/sorting if needed, but we'll prioritize components
+  lastConversation: string;
   notes: string;
   email?: string;
   linkedin?: string;

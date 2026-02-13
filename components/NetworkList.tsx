@@ -8,9 +8,10 @@ interface NetworkListProps {
   companies: Company[];
   onAddContact: (contact: Contact) => void;
   onUpdateContact: (contact: Contact) => void;
+  userLocation: string;
 }
 
-const NOTE_TEMPLATE = `Location: 
+const getNoteTemplate = (loc: string) => `Location: ${loc}
 Company: 
 University: 
 Common Ground: 
@@ -21,17 +22,16 @@ const MONTHS = [
   "July", "August", "September", "October", "November", "December"
 ];
 
-const YEARS = Array.from({ length: 26 }, (_, i) => 2025 - i);
+const YEARS = Array.from({ length: 27 }, (_, i) => 2026 - i);
 const DAYS = Array.from({ length: 31 }, (_, i) => i + 1);
 
 // --- Custom Liquid Glass Dropdown ---
 const GlassDropdown: React.FC<{
-  label: string;
   value?: number;
   options: { label: string; value: number }[];
   onChange: (val?: number) => void;
-  placeholder?: string;
-}> = ({ label, value, options, onChange, placeholder = "None" }) => {
+  placeholder: string;
+}> = ({ value, options, onChange, placeholder }) => {
   const [isOpen, setIsOpen] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
 
@@ -48,17 +48,16 @@ const GlassDropdown: React.FC<{
   const selectedOption = options.find(o => o.value === value);
 
   return (
-    <div className="relative flex-1 min-w-[100px]" ref={containerRef}>
-      <label className="block text-[10px] font-black text-gray-400 uppercase tracking-widest mb-1.5 ml-1">{label}</label>
+    <div className="relative flex-1 min-w-[110px]" ref={containerRef}>
       <button
         type="button"
         onClick={() => setIsOpen(!isOpen)}
-        className="w-full flex items-center justify-between px-4 py-3 bg-white/50 backdrop-blur-md border border-white rounded-xl text-sm font-bold text-gray-700 hover:bg-white transition-all shadow-sm"
+        className="w-full flex items-center justify-between px-3.5 py-2.5 bg-white/50 backdrop-blur-md border border-white rounded-xl text-sm font-bold text-gray-700 hover:bg-white transition-all shadow-sm"
       >
-        <span className={!selectedOption ? "text-gray-400" : ""}>
+        <span className={!selectedOption ? "text-gray-400 font-medium" : ""}>
           {selectedOption ? selectedOption.label : placeholder}
         </span>
-        <svg className={`w-4 h-4 transition-transform ${isOpen ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <svg className={`w-4 h-4 text-gray-400 transition-transform duration-200 ${isOpen ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M19 9l-7 7-7-7" />
         </svg>
       </button>
@@ -99,7 +98,7 @@ interface GraphEdge {
   source: string; target: string;
 }
 
-const NetworkList: React.FC<NetworkListProps> = ({ network, companies, onAddContact, onUpdateContact }) => {
+const NetworkList: React.FC<NetworkListProps> = ({ network, companies, onAddContact, onUpdateContact, userLocation }) => {
   const [viewMode, setViewMode] = useState<'list' | 'brain'>('list');
   const [isAdding, setIsAdding] = useState(false);
   const [selectedContact, setSelectedContact] = useState<Contact | null>(null);
@@ -107,11 +106,13 @@ const NetworkList: React.FC<NetworkListProps> = ({ network, companies, onAddCont
   const [starters, setStarters] = useState<string[]>([]);
   const [isGenerating, setIsGenerating] = useState(false);
   
+  // Initialize with current date
+  const now = new Date();
   const [formData, setFormData] = useState({ 
-    name: '', context: NOTE_TEMPLATE, 
-    year: undefined as number | undefined, 
-    month: undefined as number | undefined, 
-    day: undefined as number | undefined 
+    name: '', context: getNoteTemplate(userLocation), 
+    year: now.getFullYear() as number | undefined, 
+    month: (now.getMonth() + 1) as number | undefined, 
+    day: now.getDate() as number | undefined 
   });
 
   const [filterMonth, setFilterMonth] = useState<number | undefined>(undefined);
@@ -183,7 +184,16 @@ const NetworkList: React.FC<NetworkListProps> = ({ network, companies, onAddCont
     };
     onAddContact(newContact);
     setIsAdding(false);
-    setFormData({ name: '', context: NOTE_TEMPLATE, year: undefined, month: undefined, day: undefined });
+    
+    // Reset to current date after addition
+    const freshNow = new Date();
+    setFormData({ 
+      name: '', 
+      context: getNoteTemplate(userLocation), 
+      year: freshNow.getFullYear(), 
+      month: freshNow.getMonth() + 1, 
+      day: freshNow.getDate() 
+    });
   };
 
   const handleUpdateContact = (e: React.FormEvent) => {
@@ -371,12 +381,24 @@ const NetworkList: React.FC<NetworkListProps> = ({ network, companies, onAddCont
     setIsEditing(true);
   };
 
+  const handleOpenAddModal = () => {
+    const freshNow = new Date();
+    setFormData({ 
+      name: '', 
+      context: getNoteTemplate(userLocation), 
+      year: freshNow.getFullYear(), 
+      month: freshNow.getMonth() + 1, 
+      day: freshNow.getDate() 
+    });
+    setIsAdding(true);
+  };
+
   return (
     <div className="space-y-8 animate-in fade-in slide-in-from-bottom-2 duration-500">
       <div className="flex flex-col md:flex-row justify-between items-start md:items-end gap-6">
         <div>
           <h2 className="text-4xl font-extrabold text-gray-900 tracking-tight">Network</h2>
-          <p className="text-gray-500 mt-1 font-medium italic">Mapping human industry synapses.</p>
+          <p className="text-gray-500 mt-1 font-medium italic">Reach out to new opportunities.</p>
         </div>
         
         <div className="flex items-center gap-3 w-full md:w-auto">
@@ -391,37 +413,44 @@ const NetworkList: React.FC<NetworkListProps> = ({ network, companies, onAddCont
             <button onClick={() => setViewMode('brain')} className={`p-2.5 rounded-full transition-all ${viewMode === 'brain' ? 'bg-white shadow-sm text-purple-600' : 'text-gray-400 hover:text-gray-600'}`} title="Synapse View"><svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" /></svg></button>
           </div>
 
-          <button onClick={() => { setFormData({ name: '', context: NOTE_TEMPLATE, year: undefined, month: undefined, day: undefined }); setIsAdding(true); }} className="bg-purple-600 hover:bg-purple-700 text-white px-8 py-3 rounded-2xl font-bold shadow-xl shadow-purple-100 transition-all hover:-translate-y-0.5">Add Person</button>
+          <button onClick={handleOpenAddModal} className="bg-purple-600 hover:bg-purple-700 text-white px-8 py-3 rounded-2xl font-bold shadow-xl shadow-purple-100 transition-all hover:-translate-y-0.5">Add Person</button>
         </div>
       </div>
 
       {viewMode === 'list' && (
         <div className="glass-card p-6 space-y-6 animate-in fade-in duration-300">
-          <div className="flex flex-col md:flex-row gap-6 items-start md:items-end">
-            <div className="flex-1 w-full">
-              <label className="block text-[10px] font-black text-gray-400 uppercase tracking-widest mb-2 ml-1">Search Keywords</label>
-              <input type="text" placeholder="Names, notes, companies..." value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} className="w-full px-5 py-3 rounded-xl bg-white/60 border border-white text-sm font-medium outline-none focus:ring-2 focus:ring-purple-200 transition-all" />
+          <div className="flex flex-col md:flex-row gap-4 items-center w-full">
+            <div className="flex-1 w-full relative">
+              <input 
+                type="text" 
+                placeholder="Search keywords, memory..." 
+                value={searchQuery} 
+                onChange={(e) => setSearchQuery(e.target.value)} 
+                className="w-full px-5 py-2.5 rounded-xl bg-white/60 border border-white text-sm font-medium outline-none focus:ring-2 focus:ring-purple-200 transition-all pl-10" 
+              />
+              <svg className="w-4 h-4 text-gray-400 absolute left-3.5 top-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" /></svg>
             </div>
             
-            {/* Filter Dropdowns */}
-            <div className="flex gap-4 w-full md:w-auto">
+            <div className="flex items-center gap-2.5 w-full md:w-auto">
               <GlassDropdown 
-                label="Filter Month" 
                 value={filterMonth} 
                 options={MONTHS.map((m, i) => ({ label: m, value: i + 1 }))} 
                 onChange={setFilterMonth} 
-                placeholder="All Months" 
+                placeholder="Month" 
               />
               <GlassDropdown 
-                label="Filter Year" 
                 value={filterYear} 
                 options={YEARS.map(y => ({ label: y.toString(), value: y }))} 
                 onChange={setFilterYear} 
-                placeholder="All Years" 
+                placeholder="Year" 
               />
+              <button 
+                onClick={() => {setSearchQuery(''); setSelectedTags([]); setFilterMonth(undefined); setFilterYear(undefined);}} 
+                className="px-4 py-2 text-xs font-black text-gray-400 hover:text-purple-600 uppercase tracking-widest transition-colors whitespace-nowrap bg-white/30 rounded-xl border border-white/50 h-[42px]"
+              >
+                Reset All
+              </button>
             </div>
-            
-            <button onClick={() => {setSearchQuery(''); setSelectedTags([]); setFilterMonth(undefined); setFilterYear(undefined);}} className="mb-1 px-4 py-3 text-xs font-black text-gray-400 hover:text-purple-600 uppercase tracking-widest transition-colors">Reset All</button>
           </div>
           
           <div className="flex flex-wrap gap-2 pt-2 border-t border-white/40">
@@ -445,11 +474,16 @@ const NetworkList: React.FC<NetworkListProps> = ({ network, companies, onAddCont
                 <input required autoFocus value={formData.name} onChange={e => setFormData({...formData, name: e.target.value})} className="w-full px-6 py-4 rounded-2xl bg-white/50 border border-white focus:ring-4 focus:ring-purple-100 outline-none transition-all font-bold text-lg" placeholder="e.g. Jane Doe" />
               </div>
               
-              {/* Custom Liquid Date Selector */}
               <div className="flex gap-4">
-                <GlassDropdown label="Day" value={formData.day} options={DAYS.map(d => ({ label: d.toString(), value: d }))} onChange={val => setFormData({...formData, day: val})} />
-                <GlassDropdown label="Month" value={formData.month} options={MONTHS.map((m, i) => ({ label: m, value: i + 1 }))} onChange={val => setFormData({...formData, month: val})} />
-                <GlassDropdown label="Year" value={formData.year} options={YEARS.map(y => ({ label: y.toString(), value: y }))} onChange={val => setFormData({...formData, year: val})} />
+                <div className="flex-1">
+                  <GlassDropdown value={formData.day} options={DAYS.map(d => ({ label: d.toString(), value: d }))} onChange={val => setFormData({...formData, day: val})} placeholder="Day" />
+                </div>
+                <div className="flex-1">
+                  <GlassDropdown value={formData.month} options={MONTHS.map((m, i) => ({ label: m, value: i + 1 }))} onChange={val => setFormData({...formData, month: val})} placeholder="Month" />
+                </div>
+                <div className="flex-1">
+                  <GlassDropdown value={formData.year} options={YEARS.map(y => ({ label: y.toString(), value: y }))} onChange={val => setFormData({...formData, year: val})} placeholder="Year" />
+                </div>
               </div>
 
               <div>
@@ -458,7 +492,7 @@ const NetworkList: React.FC<NetworkListProps> = ({ network, companies, onAddCont
               </div>
               <div className="flex gap-4 pt-4">
                 <button type="button" onClick={() => setIsAdding(false)} className="flex-1 py-4 text-gray-500 font-bold hover:text-gray-900">Cancel</button>
-                <button type="submit" className="flex-[2] py-4 bg-purple-600 text-white font-black uppercase tracking-widest rounded-2xl hover:bg-purple-700 shadow-lg shadow-purple-100 transition-all">Save to Nexus</button>
+                <button type="submit" className="flex-[2] py-4 bg-purple-600 text-white font-black uppercase tracking-widest rounded-2xl hover:bg-purple-700 shadow-lg shadow-purple-100 transition-all">Save to Synapse</button>
               </div>
             </form>
           </div>
@@ -487,6 +521,9 @@ const NetworkList: React.FC<NetworkListProps> = ({ network, companies, onAddCont
         </div>
       ) : (
         <div className="glass-card w-full h-[650px] relative overflow-hidden animate-in fade-in duration-700 border-indigo-100/50 shadow-inner bg-white/10 group/canvas">
+          <div className="absolute top-8 left-8 z-10 pointer-events-none select-none">
+            <h3 className="text-[11px] font-black text-indigo-400 uppercase tracking-[0.6em] opacity-40">Synapse Cloud</h3>
+          </div>
           <canvas ref={canvasRef} width={1200} height={650} onWheel={handleWheel} onMouseMove={handleMouseMove} onClick={() => { if (hoveredNodeId) { const node = graphNodes.find(n => n.id === hoveredNodeId); if (node?.type === 'person') { setSelectedContact(network.find(c => c.id === node.originalId) || null); setStarters([]); setIsEditing(false); } } }} className="w-full h-full cursor-grab active:cursor-grabbing opacity-90 hover:opacity-100 transition-opacity" />
         </div>
       )}
@@ -504,9 +541,15 @@ const NetworkList: React.FC<NetworkListProps> = ({ network, companies, onAddCont
                     <input required autoFocus value={formData.name} onChange={e => setFormData({...formData, name: e.target.value})} className="w-full px-6 py-4 rounded-2xl bg-white/50 border border-white focus:ring-4 focus:ring-indigo-100 outline-none transition-all font-bold text-lg" />
                   </div>
                   <div className="flex gap-2">
-                    <GlassDropdown label="Day" value={formData.day} options={DAYS.map(d => ({ label: d.toString(), value: d }))} onChange={val => setFormData({...formData, day: val})} />
-                    <GlassDropdown label="Month" value={formData.month} options={MONTHS.map((m, i) => ({ label: m, value: i + 1 }))} onChange={val => setFormData({...formData, month: val})} />
-                    <GlassDropdown label="Year" value={formData.year} options={YEARS.map(y => ({ label: y.toString(), value: y }))} onChange={val => setFormData({...formData, year: val})} />
+                    <div className="flex-1">
+                      <GlassDropdown value={formData.day} options={DAYS.map(d => ({ label: d.toString(), value: d }))} onChange={val => setFormData({...formData, day: val})} placeholder="Day" />
+                    </div>
+                    <div className="flex-1">
+                      <GlassDropdown value={formData.month} options={MONTHS.map((m, i) => ({ label: m, value: i + 1 }))} onChange={val => setFormData({...formData, month: val})} placeholder="Month" />
+                    </div>
+                    <div className="flex-1">
+                      <GlassDropdown value={formData.year} options={YEARS.map(y => ({ label: y.toString(), value: y }))} onChange={val => setFormData({...formData, year: val})} placeholder="Year" />
+                    </div>
                   </div>
                 </div>
                 <textarea rows={10} value={formData.context} onChange={e => setFormData({...formData, context: e.target.value})} className="w-full px-6 py-6 rounded-2xl bg-white/50 border border-white focus:ring-4 focus:ring-indigo-100 outline-none transition-all font-medium text-gray-700 leading-relaxed font-mono text-sm" />

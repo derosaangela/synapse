@@ -25,7 +25,7 @@ const Dashboard: React.FC<DashboardProps> = ({ companies, network, onNavigate })
     <div className="space-y-8 animate-in fade-in duration-500">
       <header>
         <h2 className="text-3xl font-extrabold text-gray-900 tracking-tight">Your Industrial Intelligence</h2>
-        <p className="text-gray-500 mt-2">Welcome back. Here's what's happening in your Nexus.</p>
+        <p className="text-gray-500 mt-2">Welcome back. Here's what's happening in your Synapse.</p>
       </header>
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
