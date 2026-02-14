@@ -2,21 +2,22 @@
 import { GoogleGenAI, Type } from "@google/genai";
 import { Company, Role, Team } from "../types";
 
-const apiKey = import.meta.env.VITE_API_KEY || "AI_DISABLED";
-export const ai = apiKey !== "AI_DISABLED" 
-  ? new GoogleGenAI(apiKey) 
-  : null;
+// Check if API key exists to prevent initialization errors in environments without secrets
+const API_KEY = process.env.API_KEY;
 
-export const getAnalysis = async (data: Company) => {
-  if (!ai) {
-    console.warn("AI features are disabled due to missing API key.");
-    return "AI insights are currently unavailable.";
-  }
-  
+export const isAiEnabled = (): boolean => {
+  return !!API_KEY && API_KEY !== "undefined" && API_KEY !== "";
+};
 
-const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+// Initialize only if key is available, otherwise use a proxy or null
+const ai = isAiEnabled() ? new GoogleGenAI({ apiKey: API_KEY! }) : null;
 
 export const enrichCompanyData = async (companyName: string): Promise<Partial<Company>> => {
+  if (!ai) {
+    console.warn("AI enrichment is offline: Missing API Key.");
+    return {};
+  }
+  
   try {
     const response = await ai.models.generateContent({
       model: 'gemini-3-flash-preview',
@@ -68,6 +69,8 @@ export const enrichCompanyData = async (companyName: string): Promise<Partial<Co
 };
 
 export const suggestRolesForCompany = async (companyName: string, industry: string): Promise<Role[]> => {
+  if (!ai) return [];
+  
   try {
     const response = await ai.models.generateContent({
       model: 'gemini-3-flash-preview',
@@ -104,6 +107,8 @@ export const suggestRolesForCompany = async (companyName: string, industry: stri
 };
 
 export const getConversationStarters = async (contactName: string, notes: string): Promise<string[]> => {
+  if (!ai) return [];
+  
   try {
     const response = await ai.models.generateContent({
       model: 'gemini-3-flash-preview',

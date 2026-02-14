@@ -1,7 +1,7 @@
 
 import React, { useState, useMemo } from 'react';
 import { Company, Role, CompanyStage, BusinessModel, Team } from '../types';
-import { enrichCompanyData, suggestRolesForCompany } from '../services/geminiService';
+import { enrichCompanyData, suggestRolesForCompany, isAiEnabled } from '../services/geminiService';
 
 interface CompaniesListProps {
   companies: Company[];
@@ -25,6 +25,8 @@ const CompaniesList: React.FC<CompaniesListProps> = ({ companies, onAddCompany, 
   const [isCustomModel, setIsCustomModel] = useState(false);
   const [editFormData, setEditFormData] = useState<Partial<Company>>({});
 
+  const aiActive = isAiEnabled();
+
   const initiateAddCompany = (e: React.FormEvent) => {
     e.preventDefault();
     if (!newCompanyName) return;
@@ -41,13 +43,18 @@ const CompaniesList: React.FC<CompaniesListProps> = ({ companies, onAddCompany, 
   const executeAddCompany = async () => {
     setIsLoading(true);
     setDuplicateWarning(false);
-    const enriched = await enrichCompanyData(newCompanyName);
+    
+    let enriched: Partial<Company> = {};
+    if (aiActive) {
+      enriched = await enrichCompanyData(newCompanyName);
+    }
+
     const newCompany: Company = {
       id: Math.random().toString(36).substr(2, 9),
       name: newCompanyName,
       industry: enriched.industry || 'Tech',
       description: enriched.description || '',
-      website: '', // Website field kept in type for compatibility but unused
+      website: '', 
       careerWebsite: enriched.careerWebsite || '',
       stage: enriched.stage || 'Startup',
       valuation: enriched.valuation,
@@ -80,6 +87,7 @@ const CompaniesList: React.FC<CompaniesListProps> = ({ companies, onAddCompany, 
   };
 
   const generateAILRoles = async (company: Company) => {
+    if (!aiActive) return;
     setIsLoading(true);
     const roles = await suggestRolesForCompany(company.name, company.industry);
     onUpdateCompany({ ...company, roles: [...company.roles, ...roles] });
@@ -100,12 +108,10 @@ const CompaniesList: React.FC<CompaniesListProps> = ({ companies, onAddCompany, 
       
       return activeInterests.some(interest => {
         if (interest === 'Startup') {
-          // If the filter is 'Startup', we show anything that is Seed or Series A/B/C...
           return stageLower === 'startup' || 
                  stageLower.includes('seed') || 
                  stageLower.includes('series');
         }
-        // Direct match for other preset filters (Scaleup, Corporate)
         return c.stage === interest;
       });
     });
@@ -166,6 +172,17 @@ const CompaniesList: React.FC<CompaniesListProps> = ({ companies, onAddCompany, 
         </button>
       </div>
 
+      {!aiActive && (
+        <div className="p-4 bg-amber-50/50 border border-amber-200 rounded-2xl flex items-center gap-3 animate-in fade-in slide-in-from-top-4 duration-700">
+          <div className="w-8 h-8 rounded-full bg-amber-100 flex items-center justify-center text-amber-600 shrink-0">
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+          </div>
+          <p className="text-sm font-bold text-amber-800">
+            AI enrichment is currently offline. <span className="font-medium">Please check your API key in environment variables.</span>
+          </p>
+        </div>
+      )}
+
       {isAdding && (
         <div className="fixed inset-0 bg-white/20 backdrop-blur-md z-50 flex items-center justify-center p-4">
           <div className="glass-card p-8 max-w-md w-full animate-in zoom-in-95 duration-300">
@@ -195,7 +212,7 @@ const CompaniesList: React.FC<CompaniesListProps> = ({ companies, onAddCompany, 
                   </div>
                 ) : (
                   <p className="mt-3 text-[10px] text-gray-400 italic leading-relaxed">
-                    Synapse AI will automatically attempt to map Valuation, Stage, Business Model, and Team Structure.
+                    {aiActive ? 'Synapse AI will automatically attempt to map Valuation, Stage, Business Model, and Team Structure.' : 'AI Enrichment is currently unavailable.'}
                   </p>
                 )}
               </div>
@@ -212,7 +229,7 @@ const CompaniesList: React.FC<CompaniesListProps> = ({ companies, onAddCompany, 
                   type="submit"
                   className="flex-[2] py-4 bg-indigo-600 text-white font-bold rounded-2xl hover:bg-indigo-700 shadow-lg shadow-indigo-100 disabled:opacity-50"
                 >
-                  {isLoading ? 'Scanning Synapses...' : (duplicateWarning ? 'Mapping...' : 'Add & Map')}
+                  {isLoading ? 'Scanning Synapses...' : (aiActive ? 'Add & Map' : 'Add Company')}
                 </button>
               </div>
             </form>
@@ -506,13 +523,15 @@ const CompaniesList: React.FC<CompaniesListProps> = ({ companies, onAddCompany, 
                   <div className="space-y-6 pt-8 border-t border-white/40">
                     <div className="flex items-center justify-between">
                       <h4 className="text-xl font-black text-gray-900">Market Opportunities</h4>
-                      <button 
-                        disabled={isLoading}
-                        onClick={() => generateAILRoles(selectedCompany)}
-                        className="bg-indigo-600 text-white px-6 py-2.5 rounded-2xl text-xs font-black uppercase tracking-widest hover:bg-indigo-700 transition-all shadow-lg shadow-indigo-100 disabled:opacity-50"
-                      >
-                        {isLoading ? 'Scanning Market...' : 'AI Pulse Search'}
-                      </button>
+                      {aiActive && (
+                        <button 
+                          disabled={isLoading}
+                          onClick={() => generateAILRoles(selectedCompany)}
+                          className="bg-indigo-600 text-white px-6 py-2.5 rounded-2xl text-xs font-black uppercase tracking-widest hover:bg-indigo-700 transition-all shadow-lg shadow-indigo-100 disabled:opacity-50"
+                        >
+                          {isLoading ? 'Scanning Market...' : 'AI Pulse Search'}
+                        </button>
+                      )}
                     </div>
 
                     {selectedCompany.roles.length > 0 ? (
@@ -538,7 +557,7 @@ const CompaniesList: React.FC<CompaniesListProps> = ({ companies, onAddCompany, 
                     ) : (
                       <div className="bg-white/20 p-16 rounded-[40px] text-center border border-dashed border-white">
                         <p className="text-gray-400 font-bold uppercase tracking-widest text-xs leading-relaxed max-w-xs mx-auto">
-                          No active role mapping identified.<br/>Use AI Pulse Search to identify typical openings.
+                          {aiActive ? 'No active role mapping identified.\nUse AI Pulse Search to identify typical openings.' : 'AI search is offline. No role mapping available.'}
                         </p>
                       </div>
                     )}
