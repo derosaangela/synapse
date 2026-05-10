@@ -2,10 +2,24 @@
 import { initializeApp } from 'firebase/app';
 import { getAuth, GoogleAuthProvider, signInWithPopup, signOut } from 'firebase/auth';
 import { getFirestore, onSnapshot, collection, doc, setDoc, updateDoc, deleteDoc, query, where, orderBy, getDocFromServer } from 'firebase/firestore';
-import firebaseConfig from './firebase-applet-config.json';
+
+// Import the functions you need from the SDKs you need
+import { initializeApp } from "firebase/app";
+// TODO: Add SDKs for Firebase products that you want to use
+// https://firebase.google.com/docs/web/setup#available-libraries
+
+// Your web app's Firebase configuration
+const firebaseConfig = {
+  apiKey: "AIzaSyAnhhxoJL-0d9w3MybY62ULimZVu2bTuL8",
+  authDomain: "synapse-sy.firebaseapp.com",
+  projectId: "synapse-sy",
+  storageBucket: "synapse-sy.firebasestorage.app",
+  messagingSenderId: "794265667457",
+  appId: "1:794265667457:web:d55eae6a44628358100a80"
+};
 
 const app = initializeApp(firebaseConfig);
-export const db = getFirestore(app, (firebaseConfig as any).firestoreDatabaseId);
+export const db = getFirestore(app);
 export const auth = getAuth(app);
 export const googleProvider = new GoogleAuthProvider();
 
