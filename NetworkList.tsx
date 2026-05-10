@@ -1,0 +1,936 @@
+
+import React, { useState, useEffect, useRef, useMemo } from 'react';
+import { Contact, Company } from '../types';
+import { getConversationStarters, generateReachOutMessage, isAiEnabled } from '../services/geminiService';
+import AIImportModal from './AIImportModal';
+
+interface NetworkListProps {
+  network: Contact[];
+  companies: Company[];
+  onAddContact: (contact: Contact) => void;
+  onUpdateContact: (contact: Contact) => void;
+  userLocation: string;
+  initialSelectedContactId?: string | null;
+  onContactHandled?: () => void;
+}
+
+const getNoteTemplate = (loc: string) => `Location: ${loc}
+Company: 
+University: 
+Common Ground: 
+Notes: `;
+
+const MONTHS = [
+  "January", "February", "March", "April", "May", "June",
+  "July", "August", "September", "October", "November", "December"
+];
+
+const YEARS = Array.from({ length: 27 }, (_, i) => 2026 - i);
+const DAYS = Array.from({ length: 31 }, (_, i) => i + 1);
+
+// --- Custom Liquid Glass Dropdown ---
+const GlassDropdown: React.FC<{
+  value?: any;
+  options: { label: string; value: any }[];
+  onChange: (val?: any) => void;
+  placeholder: string;
+  hideClear?: boolean;
+}> = ({ value, options, onChange, placeholder, hideClear }) => {
+  const [isOpen, setIsOpen] = useState(false);
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (containerRef.current && !containerRef.current.contains(event.target as Node)) {
+        setIsOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  const selectedOption = options.find(o => o.value === value);
+
+  return (
+    <div className="relative flex-1 min-w-[110px]" ref={containerRef}>
+      <button
+        type="button"
+        onClick={() => setIsOpen(!isOpen)}
+        className="w-full flex items-center justify-between px-3.5 py-2.5 bg-white/50 backdrop-blur-md border border-white rounded-xl text-sm font-bold text-gray-700 hover:bg-white transition-all shadow-sm"
+      >
+        <span className={!selectedOption ? "text-gray-400 font-medium" : ""}>
+          {selectedOption ? selectedOption.label : placeholder}
+        </span>
+        <svg className={`w-4 h-4 text-gray-400 transition-transform duration-200 ${isOpen ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M19 9l-7 7-7-7" />
+        </svg>
+      </button>
+
+      {isOpen && (
+        <div className="absolute z-[60] mt-2 w-full max-h-48 overflow-y-auto no-scrollbar glass-card p-1 shadow-2xl animate-in fade-in zoom-in-95 duration-200">
+          {!hideClear && (
+            <button
+              type="button"
+              onClick={() => { onChange(undefined); setIsOpen(false); }}
+              className="w-full text-left px-4 py-2.5 text-xs font-black text-gray-400 uppercase tracking-widest hover:bg-white/60 rounded-lg transition-colors"
+            >
+              Clear
+            </button>
+          )}
+          {options.map(opt => (
+            <button
+              key={opt.value}
+              type="button"
+              onClick={() => { onChange(opt.value); setIsOpen(false); }}
+              className={`w-full text-left px-4 py-2.5 text-sm font-bold rounded-lg transition-colors ${value === opt.value ? 'bg-purple-600 text-white' : 'text-gray-600 hover:bg-white/60'}`}
+            >
+              {opt.label}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
+
+// --- Graph Types ---
+type NodeType = 'person' | 'tag';
+
+interface GraphNode {
+  id: string; label: string; type: NodeType; x: number; y: number; vx: number; vy: number; scale: number; originalId: string;
+}
+
+interface GraphEdge {
+  source: string; target: string;
+}
+
+const NetworkList: React.FC<NetworkListProps> = ({ 
+  network, 
+  companies, 
+  onAddContact, 
+  onUpdateContact, 
+  userLocation,
+  initialSelectedContactId,
+  onContactHandled
+}) => {
+  const [viewMode, setViewMode] = useState<'list' | 'brain'>('list');
+  const [isAdding, setIsAdding] = useState(false);
+  const [isAIImporting, setIsAIImporting] = useState(false);
+  const [selectedContact, setSelectedContact] = useState<Contact | null>(null);
+  const [isEditing, setIsEditing] = useState(false);
+  const [starters, setStarters] = useState<string[]>([]);
+  const [draftMessage, setDraftMessage] = useState<string>('');
+  const [quickNote, setQuickNote] = useState('');
+  const [isGenerating, setIsGenerating] = useState(false);
+  const [isGeneratingDraft, setIsGeneratingDraft] = useState(false);
+  
+  const aiActive = isAiEnabled();
+
+  // Initialize with current date
+  const now = new Date();
+  const [formData, setFormData] = useState({ 
+    name: '', context: getNoteTemplate(userLocation), 
+    year: now.getFullYear() as number | undefined, 
+    month: (now.getMonth() + 1) as number | undefined, 
+    day: now.getDate() as number | undefined,
+    cadence: 30 as number | undefined,
+    email: '',
+    linkedin: ''
+  });
+
+  const [filterMonth, setFilterMonth] = useState<number | undefined>(undefined);
+  const [filterYear, setFilterYear] = useState<number | undefined>(undefined);
+  const [sortBy, setSortBy] = useState<'name' | 'date' | 'company'>('name');
+  const [selectedTags, setSelectedTags] = useState<string[]>([]);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [tagFilter, setTagFilter] = useState('');
+
+  const [zoom, setZoom] = useState(1);
+  const [offset, setOffset] = useState({ x: 0, y: 0 });
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const [graphNodes, setGraphNodes] = useState<GraphNode[]>([]);
+  const [hoveredNodeId, setHoveredNodeId] = useState<string | null>(null);
+  const requestRef = useRef<number>(undefined);
+
+  const allUniqueTags = useMemo(() => {
+    const tags = new Set<string>();
+    network.forEach(c => c.tags.forEach(t => tags.add(t)));
+    return Array.from(tags).sort();
+  }, [network]);
+
+  const isDueForReachOut = (contact: Contact) => {
+    if (!contact.cadence || contact.cadence === 0) return false;
+    
+    const lastDate = contact.lastConversationYear && contact.lastConversationMonth && contact.lastConversationDay
+      ? new Date(contact.lastConversationYear, contact.lastConversationMonth - 1, contact.lastConversationDay)
+      : new Date(0);
+    
+    const diffTime = Math.abs(now.getTime() - lastDate.getTime());
+    const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+    
+    return diffDays >= contact.cadence;
+  };
+
+  const formatDate = (c: Contact) => {
+    if (!c.lastConversationYear && !c.lastConversationMonth && !c.lastConversationDay) return "Unspecified Date";
+    const parts = [];
+    if (c.lastConversationDay) parts.push(c.lastConversationDay);
+    if (c.lastConversationMonth) parts.push(MONTHS[c.lastConversationMonth - 1]);
+    if (c.lastConversationYear) parts.push(c.lastConversationYear);
+    return parts.join(" ");
+  };
+
+  const getCompanyName = (contact: Contact, companies: Company[]) => {
+    if (contact.companyId) {
+      const company = companies.find(c => c.id === contact.companyId);
+      if (company) return company.name;
+    }
+    const lines = contact.notes.split('\n');
+    const companyLine = lines.find(l => l.startsWith('Company:'));
+    if (companyLine) {
+      return companyLine.split(':')[1]?.trim() || '';
+    }
+    return '';
+  };
+
+  const filteredNetwork = useMemo(() => {
+    const filtered = network.filter(contact => {
+      const matchesSearch = contact.name.toLowerCase().includes(searchQuery.toLowerCase()) || 
+                           contact.notes.toLowerCase().includes(searchQuery.toLowerCase());
+      const matchesTags = selectedTags.length === 0 || 
+                         selectedTags.every(tag => contact.tags.includes(tag));
+      
+      const matchesMonth = filterMonth === undefined || contact.lastConversationMonth === filterMonth;
+      const matchesYear = filterYear === undefined || contact.lastConversationYear === filterYear;
+
+      return matchesSearch && matchesTags && matchesMonth && matchesYear;
+    });
+
+    return [...filtered].sort((a, b) => {
+      if (sortBy === 'name') {
+        return a.name.localeCompare(b.name);
+      } else if (sortBy === 'date') {
+        const dateA = (a.lastConversationYear || 0) * 10000 + (a.lastConversationMonth || 0) * 100 + (a.lastConversationDay || 0);
+        const dateB = (b.lastConversationYear || 0) * 10000 + (b.lastConversationMonth || 0) * 100 + (b.lastConversationDay || 0);
+        return dateB - dateA; // Newest first
+      } else if (sortBy === 'company') {
+        const compA = getCompanyName(a, companies);
+        const compB = getCompanyName(b, companies);
+        return compA.localeCompare(compB);
+      }
+      return 0;
+    });
+  }, [network, searchQuery, selectedTags, filterMonth, filterYear, sortBy, companies]);
+
+  const extractTags = (text: string): string[] => {
+    const labels = ['location', 'company', 'university', 'common', 'ground', 'notes'];
+    const stopWords = new Set(['this', 'that', 'with', 'from', 'they', 'have', 'about', 'just', 'there', 'when', 'the', 'and', 'for', 'are', 'was', 'you', 'your', 'but', 'not', 'did', 'had']);
+    const words = text.toLowerCase()
+      .replace(/[.,\/#!$%\^&\*;:{}=\-_`~()]/g, " ")
+      .split(/\s+/)
+      .filter(w => w.length > 2 && !stopWords.has(w) && !labels.includes(w));
+    return Array.from(new Set(words));
+  };
+
+  const handleAddContact = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!formData.name) return;
+    const allTags = extractTags(formData.context);
+    const newContact: Contact = {
+      id: Math.random().toString(36).substr(2, 9),
+      name: formData.name,
+      location: '', companyId: '', howMet: '', commonalities: '',
+      notes: formData.context,
+      lastConversationYear: formData.year,
+      lastConversationMonth: formData.month,
+      lastConversationDay: formData.day,
+      lastConversation: `${formData.year || ''}-${formData.month || ''}-${formData.day || ''}`,
+      tags: allTags,
+      cadence: formData.cadence,
+      email: formData.email,
+      linkedin: formData.linkedin
+    };
+    onAddContact(newContact);
+    setIsAdding(false);
+    
+    const freshNow = new Date();
+    setFormData({ 
+      name: '', 
+      context: getNoteTemplate(userLocation), 
+      year: freshNow.getFullYear(), 
+      month: freshNow.getMonth() + 1, 
+      day: freshNow.getDate(),
+      cadence: 30,
+      email: '',
+      linkedin: ''
+    });
+  };
+
+  const handleUpdateContact = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedContact) return;
+    const updatedTags = extractTags(formData.context);
+    const updated: Contact = {
+      ...selectedContact,
+      name: formData.name,
+      notes: formData.context,
+      lastConversationYear: formData.year,
+      lastConversationMonth: formData.month,
+      lastConversationDay: formData.day,
+      lastConversation: `${formData.year || ''}-${formData.month || ''}-${formData.day || ''}`,
+      tags: updatedTags,
+      cadence: formData.cadence,
+      email: formData.email,
+      linkedin: formData.linkedin
+    };
+    onUpdateContact(updated);
+    setSelectedContact(updated);
+    setIsEditing(false);
+  };
+
+  const handleLogInteraction = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedContact || !quickNote.trim()) return;
+
+    const today = new Date();
+    const interactionLog = `\n\n[LOG: ${today.toLocaleDateString()}]\n${quickNote.trim()}`;
+    
+    const updated: Contact = {
+      ...selectedContact,
+      notes: selectedContact.notes + interactionLog,
+      lastConversationYear: today.getFullYear(),
+      lastConversationMonth: today.getMonth() + 1,
+      lastConversationDay: today.getDate(),
+      lastConversation: `${today.getFullYear()}-${today.getMonth() + 1}-${today.getDate()}`,
+    };
+
+    onUpdateContact(updated);
+    setSelectedContact(updated);
+    setQuickNote('');
+  };
+
+  const generateStarters = async (contact: Contact) => {
+    if (!aiActive) return;
+    setIsGenerating(true);
+    const result = await getConversationStarters(contact.name, contact.notes);
+    setStarters(result);
+    setIsGenerating(false);
+  };
+
+  const generateDraft = React.useCallback(async (contact: Contact) => {
+    if (!aiActive) return;
+    setIsGeneratingDraft(true);
+    const result = await generateReachOutMessage(contact.name, contact.notes, contact.cadence);
+    setDraftMessage(result);
+    setIsGeneratingDraft(false);
+  }, [aiActive]);
+
+  useEffect(() => {
+    if (initialSelectedContactId) {
+      const contact = network.find(c => c.id === initialSelectedContactId);
+      if (contact) {
+        setSelectedContact(contact);
+        setStarters([]);
+        setDraftMessage('');
+        setIsEditing(false);
+        generateDraft(contact);
+        if (onContactHandled) onContactHandled();
+      }
+    }
+  }, [initialSelectedContactId, network, onContactHandled, generateDraft]);
+
+  const { nodes: initialNodes, edges: graphEdges } = useMemo(() => {
+    const nodes: GraphNode[] = [];
+    const edges: GraphEdge[] = [];
+    const tagMap = new Map<string, string>();
+    network.forEach(contact => {
+      const personNodeId = `p-${contact.id}`;
+      nodes.push({ id: personNodeId, label: contact.name, type: 'person', originalId: contact.id, x: Math.random() * 800 + 200, y: Math.random() * 400 + 100, vx: 0, vy: 0, scale: 1 });
+      contact.tags.forEach(tag => {
+        let tagNodeId = tagMap.get(tag);
+        if (!tagNodeId) {
+          tagNodeId = `t-${tag}`; tagMap.set(tag, tagNodeId);
+          nodes.push({ id: tagNodeId, label: tag, type: 'tag', originalId: tag, x: Math.random() * 800 + 200, y: Math.random() * 400 + 100, vx: 0, vy: 0, scale: 1 });
+        }
+        edges.push({ source: personNodeId, target: tagNodeId });
+      });
+    });
+    return { nodes, edges };
+  }, [network]);
+
+  useEffect(() => { if (viewMode === 'brain') setGraphNodes(initialNodes); }, [viewMode, initialNodes]);
+
+  const animate = () => {
+    setGraphNodes(prevNodes => {
+      if (prevNodes.length === 0) return prevNodes;
+      const highlightIds = new Set<string>();
+      if (hoveredNodeId) {
+        highlightIds.add(hoveredNodeId);
+        graphEdges.forEach(edge => {
+          if (edge.source === hoveredNodeId) highlightIds.add(edge.target);
+          if (edge.target === hoveredNodeId) highlightIds.add(edge.source);
+        });
+      }
+      const newNodes = prevNodes.map(n => ({ ...n }));
+      const width = canvasRef.current?.width || 1200;
+      const height = canvasRef.current?.height || 650;
+      for (let i = 0; i < newNodes.length; i++) {
+        const nodeA = newNodes[i];
+        const isHighlighted = highlightIds.has(nodeA.id);
+        const targetScale = isHighlighted ? (hoveredNodeId === nodeA.id ? 2.0 : 1.4) : 1;
+        nodeA.scale += (targetScale - nodeA.scale) * 0.15;
+        for (let j = 0; j < newNodes.length; j++) {
+          if (i === j) continue;
+          const nodeB = newNodes[j];
+          const dx = nodeA.x - nodeB.x; const dy = nodeA.y - nodeB.y;
+          const distSq = dx * dx + dy * dy + 1; const force = 1800 / distSq;
+          nodeA.vx += (dx / Math.sqrt(distSq)) * force; nodeA.vy += (dy / Math.sqrt(distSq)) * force;
+        }
+        graphEdges.forEach(edge => {
+          if (edge.source === nodeA.id || edge.target === nodeA.id) {
+            const otherId = edge.source === nodeA.id ? edge.target : edge.source;
+            const other = newNodes.find(n => n.id === otherId);
+            if (other) {
+              nodeA.vx += (other.x - nodeA.x) * 0.05; nodeA.vy += (other.y - nodeA.y) * 0.05;
+            }
+          }
+        });
+        nodeA.vx += (width / 2 - nodeA.x) * 0.005; nodeA.vy += (height / 2 - nodeA.y) * 0.005;
+        nodeA.x += nodeA.vx; nodeA.y += nodeA.vy;
+        nodeA.vx *= 0.8; nodeA.vy *= 0.8;
+      }
+      return newNodes;
+    });
+
+    const canvas = canvasRef.current;
+    if (canvas) {
+      const ctx = canvas.getContext('2d');
+      if (ctx) {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.save();
+        ctx.translate(canvas.width / 2 + offset.x, canvas.height / 2 + offset.y);
+        ctx.scale(zoom, zoom);
+        ctx.translate(-canvas.width / 2, -canvas.height / 2);
+        const highlightIds = new Set<string>();
+        if (hoveredNodeId) {
+          highlightIds.add(hoveredNodeId);
+          graphEdges.forEach(edge => {
+            if (edge.source === hoveredNodeId) highlightIds.add(edge.target);
+            if (edge.target === hoveredNodeId) highlightIds.add(edge.source);
+          });
+        }
+        graphEdges.forEach(edge => {
+          const s = graphNodes.find(n => n.id === edge.source);
+          const t = graphNodes.find(n => n.id === edge.target);
+          if (s && t) {
+            const rel = hoveredNodeId === s.id || hoveredNodeId === t.id;
+            ctx.beginPath(); ctx.moveTo(s.x, s.y); ctx.lineTo(t.x, t.y);
+            ctx.strokeStyle = rel ? 'rgba(79, 70, 229, 0.4)' : 'rgba(79, 70, 229, 0.06)';
+            ctx.lineWidth = rel ? 1.5 / zoom : 1 / zoom; ctx.stroke();
+          }
+        });
+        graphNodes.forEach(node => {
+          const isTag = node.type === 'tag';
+          const isDirectlyHovered = hoveredNodeId === node.id;
+          const isHighlighted = highlightIds.has(node.id);
+          const isFilterMatch = tagFilter && node.label.toLowerCase().includes(tagFilter.toLowerCase());
+          ctx.save(); ctx.translate(node.x, node.y);
+          if (isTag) {
+            const gs = (isDirectlyHovered ? 20 : (isHighlighted ? 15 : 12)) * node.scale;
+            const grad = ctx.createRadialGradient(0, 0, 0, 0, 0, gs);
+            grad.addColorStop(0, isHighlighted ? 'rgba(79, 70, 229, 0.3)' : 'rgba(79, 70, 229, 0.15)');
+            grad.addColorStop(1, 'transparent'); ctx.fillStyle = grad;
+            ctx.beginPath(); ctx.arc(0, 0, gs, 0, Math.PI * 2); ctx.fill();
+            ctx.fillStyle = isFilterMatch || isHighlighted ? '#4f46e5' : '#1e293b';
+            ctx.beginPath(); ctx.arc(0, 0, (isHighlighted ? 7 : 6) * node.scale, 0, Math.PI * 2); ctx.fill();
+            ctx.fillStyle = isFilterMatch || isHighlighted ? '#4f46e5' : '#475569';
+            ctx.font = `${isHighlighted ? 'bold' : '600'} ${isDirectlyHovered ? 14 : (isHighlighted ? 12 : 10)}px Plus Jakarta Sans`;
+            ctx.textAlign = 'center'; ctx.fillText(`#${node.label}`, 0, -(14 * node.scale));
+          } else {
+            ctx.fillStyle = isHighlighted ? '#4f46e5' : '#0f172a';
+            ctx.beginPath(); ctx.ellipse(0, 0, (isHighlighted ? 5 : 4) * node.scale, (isHighlighted ? 4 : 3) * node.scale, 0, 0, Math.PI * 2); ctx.fill();
+            ctx.fillStyle = isDirectlyHovered || isHighlighted ? '#1e293b' : '#94a3b8';
+            ctx.font = `${isHighlighted ? '600' : '500'} ${isDirectlyHovered ? 12 : (isHighlighted ? 10 : 9)}px Plus Jakarta Sans`;
+            ctx.textAlign = 'center'; ctx.fillText(node.label, 0, 18 * node.scale);
+          }
+          ctx.restore();
+        });
+        ctx.restore();
+      }
+    }
+    requestRef.current = requestAnimationFrame(animate);
+  };
+
+  useEffect(() => {
+    if (viewMode === 'brain') requestRef.current = requestAnimationFrame(animate);
+    else if (requestRef.current) cancelAnimationFrame(requestRef.current);
+    return () => { if (requestRef.current) cancelAnimationFrame(requestRef.current); };
+  }, [viewMode, graphNodes, graphEdges, hoveredNodeId, tagFilter, zoom, offset]);
+
+  const handleWheel = (e: React.WheelEvent<HTMLCanvasElement>) => {
+    if (viewMode !== 'brain') return;
+    setZoom(prev => Math.max(0.2, Math.min(5, prev * (e.deltaY > 0 ? 0.9 : 1.1))));
+  };
+
+  const handleMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    const rect = canvasRef.current?.getBoundingClientRect(); if (!rect) return;
+    const canvas = canvasRef.current!;
+    const canvasX = (e.clientX - rect.left) * (canvas.width / rect.width);
+    const canvasY = (e.clientY - rect.top) * (canvas.height / rect.height);
+    const mx = (canvasX - canvas.width / 2 - offset.x) / zoom + canvas.width / 2;
+    const my = (canvasY - canvas.height / 2 - offset.y) / zoom + canvas.height / 2;
+    const found = graphNodes.find(n => Math.sqrt((n.x - mx) ** 2 + (n.y - my) ** 2) < (n.type === 'tag' ? 30 : 20) / zoom);
+    setHoveredNodeId(found ? found.id : null);
+    if (e.buttons === 1 && !found) {
+      setOffset(prev => ({ x: prev.x + e.movementX * (canvas.width / rect.width), y: prev.y + e.movementY * (canvas.height / rect.height) }));
+    }
+  };
+
+  const openEditModal = (contact: Contact) => {
+    setFormData({ 
+      name: contact.name, 
+      context: contact.notes, 
+      year: contact.lastConversationYear,
+      month: contact.lastConversationMonth,
+      day: contact.lastConversationDay,
+      cadence: contact.cadence,
+      email: contact.email || '',
+      linkedin: contact.linkedin || ''
+    });
+    setIsEditing(true);
+  };
+
+  const handleOpenAddModal = () => {
+    const freshNow = new Date();
+    setFormData({ 
+      name: '', 
+      context: getNoteTemplate(userLocation), 
+      year: freshNow.getFullYear(), 
+      month: freshNow.getMonth() + 1, 
+      day: freshNow.getDate(),
+      cadence: 30,
+      email: '',
+      linkedin: ''
+    });
+    setIsAdding(true);
+  };
+
+  const handleAIImport = (extracted: Partial<Contact>) => {
+    const freshNow = new Date();
+    const newContact: Contact = {
+      id: Math.random().toString(36).substr(2, 9),
+      name: extracted.name || 'Unnamed Contact',
+      location: '',
+      companyId: '',
+      howMet: '',
+      commonalities: '',
+      notes: extracted.notes || getNoteTemplate(userLocation),
+      lastConversationYear: freshNow.getFullYear(),
+      lastConversationMonth: freshNow.getMonth() + 1,
+      lastConversationDay: freshNow.getDate(),
+      lastConversation: `${freshNow.getFullYear()}-${freshNow.getMonth() + 1}-${freshNow.getDate()}`,
+      tags: extractTags(extracted.notes || ''),
+      cadence: extracted.cadence || 30,
+      email: extracted.email || '',
+      linkedin: extracted.linkedin || ''
+    };
+    onAddContact(newContact);
+  };
+
+  return (
+    <div className="space-y-8 animate-in fade-in slide-in-from-bottom-2 duration-500">
+      <div className="flex flex-col md:flex-row justify-between items-start md:items-end gap-6">
+        <div>
+          <h2 className="text-4xl font-extrabold text-gray-900 tracking-tight">Network</h2>
+          <p className="text-gray-500 mt-1 font-medium italic">Reach out to new opportunities.</p>
+        </div>
+        
+        <div className="flex items-center gap-3 w-full md:w-auto">
+          <div className="flex items-center gap-2 px-3 py-2 bg-white/40 border border-white/60 rounded-xl backdrop-blur-md">
+            <div className="w-2 h-2 rounded-full bg-rose-500 animate-pulse"></div>
+            <span className="text-[10px] font-bold text-rose-600 uppercase tracking-wider">
+              {network.filter(isDueForReachOut).length} Overdue
+            </span>
+          </div>
+          {viewMode === 'brain' && (
+            <div className="relative flex-1 md:flex-none md:w-48">
+              <input type="text" placeholder="Search graph..." value={tagFilter} onChange={(e) => setTagFilter(e.target.value)} className="w-full px-4 py-2.5 rounded-xl bg-white/60 border border-white text-xs font-bold outline-none focus:ring-2 focus:ring-purple-200 transition-all" />
+            </div>
+          )}
+
+          <div className="glass-nav p-1 flex items-center gap-1">
+            <button onClick={() => setViewMode('list')} className={`p-2.5 rounded-full transition-all ${viewMode === 'list' ? 'bg-white shadow-sm text-purple-600' : 'text-gray-400 hover:text-gray-600'}`} title="List View"><svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" /></svg></button>
+            <button onClick={() => setViewMode('brain')} className={`p-2.5 rounded-full transition-all ${viewMode === 'brain' ? 'bg-white shadow-sm text-purple-600' : 'text-gray-400 hover:text-gray-600'}`} title="Synapse View"><svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" /></svg></button>
+          </div>
+
+          <button 
+            onClick={() => setIsAIImporting(true)} 
+            className="group relative px-6 py-3 rounded-2xl font-bold bg-white border border-indigo-100 text-indigo-600 shadow-xl shadow-indigo-50/50 transition-all hover:border-indigo-200 active:scale-95 flex items-center gap-2 overflow-hidden"
+          >
+             <div className="absolute inset-0 bg-gradient-to-tr from-indigo-50 to-transparent opacity-0 group-hover:opacity-100 transition-opacity" />
+             <svg className="w-4 h-4 relative" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
+            </svg>
+            <span className="relative">AI Import</span>
+          </button>
+
+          <button onClick={handleOpenAddModal} className="bg-purple-600 hover:bg-purple-700 text-white px-8 py-3 rounded-2xl font-bold shadow-xl shadow-purple-100 transition-all hover:-translate-y-0.5">Add Person</button>
+        </div>
+      </div>
+
+      {!aiActive && (
+        <div className="p-4 bg-amber-50/50 border border-amber-200 rounded-2xl flex items-center gap-3 animate-in fade-in slide-in-from-top-4 duration-700">
+          <div className="w-8 h-8 rounded-full bg-amber-100 flex items-center justify-center text-amber-600 shrink-0">
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+          </div>
+          <p className="text-sm font-bold text-amber-800">
+            AI features are currently offline. <span className="font-medium">Please check your API key in environment variables.</span>
+          </p>
+        </div>
+      )}
+
+      {viewMode === 'list' && (
+        <div className="glass-card p-6 space-y-6 animate-in fade-in duration-300">
+          <div className="flex flex-col md:flex-row gap-4 items-center w-full">
+            <div className="flex-1 w-full relative">
+              <input 
+                type="text" 
+                placeholder="Search keywords, memory..." 
+                value={searchQuery} 
+                onChange={(e) => setSearchQuery(e.target.value)} 
+                className="w-full px-5 py-2.5 rounded-xl bg-white/60 border border-white text-sm font-medium outline-none focus:ring-2 focus:ring-purple-200 transition-all pl-10" 
+              />
+              <svg className="w-4 h-4 text-gray-400 absolute left-3.5 top-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" /></svg>
+            </div>
+            
+            <div className="flex items-center gap-2.5 w-full md:w-auto">
+              <GlassDropdown 
+                value={filterMonth} 
+                options={MONTHS.map((m, i) => ({ label: m, value: i + 1 }))} 
+                onChange={setFilterMonth} 
+                placeholder="Month" 
+              />
+              <GlassDropdown 
+                value={filterYear} 
+                options={YEARS.map(y => ({ label: y.toString(), value: y }))} 
+                onChange={setFilterYear} 
+                placeholder="Year" 
+              />
+              <GlassDropdown 
+                value={sortBy} 
+                options={[
+                  { label: 'Sort: Name', value: 'name' },
+                  { label: 'Sort: Date', value: 'date' },
+                  { label: 'Sort: Company', value: 'company' }
+                ]} 
+                onChange={(val) => setSortBy(val || 'name')} 
+                placeholder="Sort By"
+                hideClear
+              />
+              <button 
+                onClick={() => {setSearchQuery(''); setSelectedTags([]); setFilterMonth(undefined); setFilterYear(undefined); setSortBy('name');}} 
+                className="px-4 py-2 text-xs font-black text-gray-400 hover:text-purple-600 uppercase tracking-widest transition-colors whitespace-nowrap bg-white/30 rounded-xl border border-white/50 h-[42px]"
+              >
+                Reset All
+              </button>
+            </div>
+          </div>
+          
+          <div className="flex flex-wrap gap-2 pt-2 border-t border-white/40">
+            {allUniqueTags.map(tag => (
+              <button key={tag} onClick={() => setSelectedTags(prev => prev.includes(tag) ? prev.filter(t => t !== tag) : [...prev, tag])} className={`px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-widest transition-all border ${selectedTags.includes(tag) ? 'bg-purple-600 border-purple-600 text-white shadow-md' : 'bg-white/40 border-white text-gray-400 hover:border-purple-200 hover:text-purple-600'}`}>#{tag}</button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {isAdding && (
+        <div className="fixed inset-0 bg-white/20 backdrop-blur-md z-50 flex items-center justify-center p-4">
+          <div className="glass-card p-10 max-w-2xl w-full animate-in zoom-in-95 duration-300 max-h-[90vh] overflow-y-auto no-scrollbar shadow-2xl border-white/40">
+            <div className="flex justify-between items-center mb-8">
+              <h3 className="text-3xl font-black text-gray-900 tracking-tight">Quick Connect</h3>
+              <button onClick={() => setIsAdding(false)} className="text-gray-400 hover:text-gray-900"><svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M6 18L18 6M6 6l12 12" /></svg></button>
+            </div>
+            <form onSubmit={handleAddContact} className="space-y-6">
+              <div>
+                <label className="block text-xs font-black text-gray-400 uppercase tracking-widest mb-2">Name (Mandatory)</label>
+                <input required autoFocus value={formData.name} onChange={e => setFormData({...formData, name: e.target.value})} className="w-full px-6 py-4 rounded-2xl bg-white/50 border border-white focus:ring-4 focus:ring-purple-100 outline-none transition-all font-bold text-lg" placeholder="e.g. Jane Doe" />
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-xs font-black text-gray-400 uppercase tracking-widest mb-2">Email Address</label>
+                  <input type="email" value={formData.email} onChange={e => setFormData({...formData, email: e.target.value})} className="w-full px-4 py-3 rounded-xl bg-white/50 border border-white focus:ring-4 focus:ring-purple-100 outline-none transition-all font-medium text-sm" placeholder="jane@example.com" />
+                </div>
+                <div>
+                  <label className="block text-xs font-black text-gray-400 uppercase tracking-widest mb-2">LinkedIn URL</label>
+                  <input type="url" value={formData.linkedin} onChange={e => setFormData({...formData, linkedin: e.target.value})} className="w-full px-4 py-3 rounded-xl bg-white/50 border border-white focus:ring-4 focus:ring-purple-100 outline-none transition-all font-medium text-sm" placeholder="linkedin.com/in/..." />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-black text-gray-400 uppercase tracking-widest mb-2">Keep in Touch Frequency</label>
+                <div className="flex gap-2 text-center">
+                  {[
+                    { label: 'Off', value: 0 },
+                    { label: 'Weekly', value: 7 },
+                    { label: 'Monthly', value: 30 },
+                    { label: 'Quarterly', value: 90 },
+                    { label: 'Half-year', value: 180 },
+                  ].map((opt) => (
+                    <button
+                      key={opt.value}
+                      type="button"
+                      onClick={() => setFormData({ ...formData, cadence: opt.value })}
+                      className={`flex-1 py-3 px-1 rounded-xl text-[9px] font-black uppercase tracking-widest transition-all border ${
+                        formData.cadence === opt.value
+                          ? 'bg-purple-600 border-purple-600 text-white shadow-lg shadow-purple-200'
+                          : 'bg-white/50 border-white text-gray-500 hover:bg-white hover:text-purple-600'
+                      }`}
+                    >
+                      {opt.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              
+              <div className="flex gap-4">
+                <div className="flex-1">
+                  <GlassDropdown value={formData.day} options={DAYS.map(d => ({ label: d.toString(), value: d }))} onChange={val => setFormData({...formData, day: val})} placeholder="Day" />
+                </div>
+                <div className="flex-1">
+                  <GlassDropdown value={formData.month} options={MONTHS.map((m, i) => ({ label: m, value: i + 1 }))} onChange={val => setFormData({...formData, month: val})} placeholder="Month" />
+                </div>
+                <div className="flex-1">
+                  <GlassDropdown value={formData.year} options={YEARS.map(y => ({ label: y.toString(), value: y }))} onChange={val => setFormData({...formData, year: val})} placeholder="Year" />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-black text-gray-400 uppercase tracking-widest mb-2">Memory Details</label>
+                <textarea rows={8} value={formData.context} onChange={e => setFormData({...formData, context: e.target.value})} className="w-full px-6 py-6 rounded-2xl bg-white/50 border border-white focus:ring-4 focus:ring-purple-100 outline-none transition-all font-medium text-gray-700 leading-relaxed font-mono text-sm" placeholder="Location: &#10;Company: &#10;University: &#10;Common Ground: &#10;Notes: " />
+              </div>
+              <div className="flex gap-4 pt-4">
+                <button type="button" onClick={() => setIsAdding(false)} className="flex-1 py-4 text-gray-500 font-bold hover:text-gray-900">Cancel</button>
+                <button type="submit" className="flex-[2] py-4 bg-purple-600 text-white font-black uppercase tracking-widest rounded-2xl hover:bg-purple-700 shadow-lg shadow-purple-100 transition-all">Save to Synapse</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {viewMode === 'list' ? (
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8 animate-in fade-in duration-500">
+          {filteredNetwork.map(contact => (
+            <div key={contact.id} onClick={() => { setSelectedContact(contact); setStarters([]); setDraftMessage(''); setIsEditing(false); }} className="glass-card p-7 hover:-translate-y-1 transition-all duration-300 cursor-pointer group border-transparent hover:border-purple-100/50 relative">
+              {isDueForReachOut(contact) && (
+                <div className="absolute top-4 right-4 flex items-center gap-1.5 px-3 py-1 bg-rose-500 text-white text-[9px] font-black uppercase tracking-[0.1em] rounded-full shadow-lg shadow-rose-200 animate-in fade-in zoom-in duration-500">
+                  <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+                  Reach Out
+                </div>
+              )}
+              <div className="flex items-center gap-5 mb-6">
+                <div className="w-14 h-14 bg-gradient-to-tr from-slate-800 to-slate-950 rounded-2xl flex items-center justify-center text-white font-black text-2xl shadow-md border border-white/10 uppercase shrink-0">{contact.name.charAt(0)}</div>
+                <div className="overflow-hidden">
+                  <h3 className="text-lg font-black text-gray-900 leading-tight group-hover:text-purple-600 transition-colors truncate">{contact.name}</h3>
+                  <p className="text-[10px] font-bold text-gray-400 uppercase tracking-widest mt-1">{formatDate(contact)}</p>
+                </div>
+              </div>
+              <div className="text-sm font-medium text-gray-500 line-clamp-3 italic mb-6 leading-relaxed bg-white/30 p-3 rounded-xl border border-white/50">
+                {contact.notes.split('\n').filter(line => line.includes(':') && line.split(':')[1].trim().length > 0).slice(0, 2).map((line, i) => (<div key={i} className="truncate">{line}</div>)) || 'View memory log...'}
+              </div>
+              <div className="flex flex-wrap gap-2 pt-6 border-t border-white/50">
+                {contact.tags.slice(0, 5).map(tag => (<span key={tag} className="px-3 py-1 bg-white/60 border border-white text-gray-400 text-[9px] font-black uppercase tracking-widest rounded-lg">#{tag}</span>))}
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div className="glass-card w-full h-[650px] relative overflow-hidden animate-in fade-in duration-700 border-indigo-100/50 shadow-inner bg-white/10 group/canvas">
+          <div className="absolute top-8 left-8 z-10 pointer-events-none select-none">
+            <h3 className="text-[11px] font-black text-indigo-400 uppercase tracking-[0.6em] opacity-40">Synapse Cloud</h3>
+          </div>
+          <canvas ref={canvasRef} width={1200} height={650} onWheel={handleWheel} onMouseMove={handleMouseMove} onClick={() => { if (hoveredNodeId) { const node = graphNodes.find(n => n.id === hoveredNodeId); if (node?.type === 'person') { setSelectedContact(network.find(c => c.id === node.originalId) || null); setStarters([]); setIsEditing(false); } } }} className="w-full h-full cursor-grab active:cursor-grabbing opacity-90 hover:opacity-100 transition-opacity" />
+        </div>
+      )}
+
+      {selectedContact && (
+        <div className="fixed inset-0 bg-black/10 backdrop-blur-xl z-50 flex items-center justify-center p-4">
+          <div className="glass-card p-10 max-w-4xl w-full max-h-[90vh] overflow-y-auto no-scrollbar animate-in zoom-in-95 duration-300 relative shadow-2xl">
+            <button onClick={() => setSelectedContact(null)} className="absolute top-6 right-6 text-gray-400 hover:text-gray-900 transition-colors"><svg className="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M6 18L18 6M6 6l12 12" /></svg></button>
+            {isEditing ? (
+              <form onSubmit={handleUpdateContact} className="space-y-6 animate-in slide-in-from-top-2">
+                <h3 className="text-3xl font-black text-gray-900 tracking-tight">Update Memory</h3>
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                  <div>
+                    <label className="block text-xs font-black text-gray-400 uppercase tracking-widest mb-2">Name</label>
+                    <input required autoFocus value={formData.name} onChange={e => setFormData({...formData, name: e.target.value})} className="w-full px-6 py-4 rounded-2xl bg-white/50 border border-white focus:ring-4 focus:ring-indigo-100 outline-none transition-all font-bold text-lg" />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-black text-gray-400 uppercase tracking-widest mb-2">Email</label>
+                    <input type="email" value={formData.email} onChange={e => setFormData({...formData, email: e.target.value})} className="w-full px-4 py-4 rounded-2xl bg-white/50 border border-white focus:ring-4 focus:ring-indigo-100 outline-none transition-all font-medium text-sm" />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-black text-gray-400 uppercase tracking-widest mb-2">LinkedIn</label>
+                    <input type="url" value={formData.linkedin} onChange={e => setFormData({...formData, linkedin: e.target.value})} className="w-full px-4 py-4 rounded-2xl bg-white/50 border border-white focus:ring-4 focus:ring-indigo-100 outline-none transition-all font-medium text-sm" />
+                  </div>
+                  <div className="flex flex-col gap-2">
+                    <label className="block text-xs font-black text-gray-400 uppercase tracking-widest mb-2">Date</label>
+                    <div className="flex gap-2">
+                      <div className="flex-1">
+                        <GlassDropdown value={formData.day} options={DAYS.map(d => ({ label: d.toString(), value: d }))} onChange={val => setFormData({...formData, day: val})} placeholder="Day" />
+                      </div>
+                      <div className="flex-1">
+                        <GlassDropdown value={formData.month} options={MONTHS.map((m, i) => ({ label: m, value: i + 1 }))} onChange={val => setFormData({...formData, month: val})} placeholder="Month" />
+                      </div>
+                      <div className="flex-1">
+                        <GlassDropdown value={formData.year} options={YEARS.map(y => ({ label: y.toString(), value: y }))} onChange={val => setFormData({...formData, year: val})} placeholder="Year" />
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-black text-gray-400 uppercase tracking-widest mb-2">Keep in Touch Frequency</label>
+                  <div className="flex gap-2">
+                    {[
+                      { label: 'Off', value: 0 },
+                      { label: 'Weekly', value: 7 },
+                      { label: 'Monthly', value: 30 },
+                      { label: 'Quarterly', value: 90 },
+                      { label: 'Half-year', value: 180 },
+                    ].map((opt) => (
+                      <button
+                        key={opt.value}
+                        type="button"
+                        onClick={() => setFormData({ ...formData, cadence: opt.value })}
+                        className={`flex-1 py-3 px-2 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all border ${
+                          formData.cadence === opt.value
+                            ? 'bg-indigo-600 border-indigo-600 text-white shadow-lg shadow-indigo-200'
+                            : 'bg-white/50 border-white text-gray-500 hover:bg-white hover:text-indigo-600'
+                        }`}
+                      >
+                        {opt.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <textarea rows={10} value={formData.context} onChange={e => setFormData({...formData, context: e.target.value})} className="w-full px-6 py-6 rounded-2xl bg-white/50 border border-white focus:ring-4 focus:ring-indigo-100 outline-none transition-all font-medium text-gray-700 leading-relaxed font-mono text-sm" />
+                <div className="flex gap-4 pt-4">
+                  <button type="button" onClick={() => setIsEditing(false)} className="flex-1 py-4 text-gray-500 font-bold hover:text-gray-900">Cancel</button>
+                  <button type="submit" className="flex-[2] py-4 bg-indigo-600 text-white font-black uppercase tracking-widest rounded-2xl hover:bg-indigo-700 shadow-lg shadow-indigo-100">Save Changes</button>
+                </div>
+              </form>
+            ) : (
+              <div className="flex flex-col md:flex-row gap-12">
+                <div className="flex-1 space-y-8">
+                  <div className="flex items-center gap-8">
+                    <div className="w-24 h-24 bg-gradient-to-br from-slate-800 to-slate-950 text-white flex items-center justify-center font-black text-5xl uppercase rounded-[32px] shadow-2xl border border-white/10 shrink-0">{selectedContact.name.charAt(0)}</div>
+                    <div className="min-w-0">
+                      <h3 className="text-4xl font-black text-gray-900 tracking-tight truncate">{selectedContact.name}</h3>
+                      <div className="flex items-center gap-4 mt-2">
+                        <p className="text-gray-400 text-xs font-bold uppercase tracking-widest">Logged: {formatDate(selectedContact)}</p>
+                        {selectedContact.email && (
+                          <a href={`mailto:${selectedContact.email}`} className="text-gray-400 hover:text-indigo-600 transition-colors" title={selectedContact.email}>
+                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" /></svg>
+                          </a>
+                        )}
+                        {selectedContact.linkedin && (
+                          <a href={selectedContact.linkedin.startsWith('http') ? selectedContact.linkedin : `https://${selectedContact.linkedin}`} target="_blank" rel="noopener noreferrer" className="text-gray-400 hover:text-indigo-600 transition-colors" title="LinkedIn Profile">
+                            <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24"><path d="M19 0h-14c-2.761 0-5 2.239-5 5v14c0 2.761 2.239 5 5 5h14c2.762 0 5-2.239 5-5v-14c0-2.761-2.238-5-5-5zm-11 19h-3v-11h3v11zm-1.5-12.268c-.966 0-1.75-.79-1.75-1.764s.784-1.764 1.75-1.764 1.75.79 1.75 1.764-.783 1.764-1.75 1.764zm13.5 12.268h-3v-5.604c0-3.368-4-3.113-4 0v5.604h-3v-11h3v1.765c1.396-2.586 7-2.777 7 2.476v6.759z"/></svg>
+                          </a>
+                        )}
+                      </div>
+                      <button onClick={() => openEditModal(selectedContact)} className="text-indigo-500 text-[10px] font-black uppercase tracking-[0.2em] hover:underline flex items-center gap-1 mt-4"><svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" /></svg>Edit Memory & Info</button>
+                    </div>
+                  </div>
+                  <section className="bg-white/50 p-8 rounded-[32px] border border-white shadow-sm italic text-lg leading-relaxed text-gray-700"><pre className="whitespace-pre-wrap font-sans">{selectedContact.notes}</pre></section>
+                  
+                  <div className="mt-8 space-y-4 animate-in slide-in-from-bottom-4 duration-500 delay-200">
+                    <h4 className="text-[10px] font-black text-gray-400 uppercase tracking-[0.4em]">Log New Interaction</h4>
+                    <form onSubmit={handleLogInteraction} className="relative">
+                      <textarea
+                        value={quickNote}
+                        onChange={(e) => setQuickNote(e.target.value)}
+                        className="w-full px-6 py-6 rounded-[28px] bg-white border border-indigo-100 focus:ring-4 focus:ring-indigo-50 outline-none transition-all font-medium text-gray-700 text-sm min-h-[120px] shadow-inner resize-none"
+                        placeholder="Quickly log notes from your last chat..."
+                      />
+                      <button
+                        type="submit"
+                        disabled={!quickNote.trim()}
+                        className="absolute bottom-6 right-6 bg-indigo-600 text-white px-8 py-2.5 rounded-2xl font-black uppercase tracking-widest text-[10px] shadow-xl shadow-indigo-100 hover:bg-indigo-700 disabled:opacity-50 transition-all active:scale-95"
+                      >
+                        Log Chat
+                      </button>
+                    </form>
+                  </div>
+                </div>
+                <div className="flex-1 space-y-8 md:border-l md:border-white/50 md:pl-12">
+                  <div className="space-y-8">
+                    <div>
+                      <div className="flex items-center justify-between mb-4">
+                        <h4 className="text-[10px] font-black text-gray-400 uppercase tracking-[0.4em]">Draft Outreach</h4>
+                        {aiActive ? (
+                          <button onClick={() => generateDraft(selectedContact)} disabled={isGeneratingDraft} className="text-rose-600 text-[10px] font-black uppercase tracking-widest hover:underline disabled:opacity-50 px-4 py-2 bg-rose-50/50 rounded-full border border-rose-100">
+                            {isGeneratingDraft ? 'Drafting...' : draftMessage ? 'Redraft' : 'Get Draft'}
+                          </button>
+                        ) : (
+                          <span className="text-[9px] font-bold text-amber-600 uppercase tracking-widest bg-amber-50 px-3 py-1 rounded-full border border-amber-100">AI Offline</span>
+                        )}
+                      </div>
+                      {draftMessage && (
+                        <div className="bg-rose-500 text-white p-6 rounded-[28px] text-lg font-bold shadow-xl shadow-rose-100/50 animate-in slide-in-from-right-4 relative group">
+                          <p>"{draftMessage}"</p>
+                          <button 
+                            onClick={() => { navigator.clipboard.writeText(draftMessage); alert('Copied to clipboard!'); }}
+                            className="absolute top-2 right-2 p-2 bg-white/20 hover:bg-white/30 rounded-xl opacity-0 group-hover:opacity-100 transition-opacity"
+                            title="Copy to clipboard"
+                          >
+                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 5H6a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2v-1M8 5a2 2 0 002 2h2a2 2 0 002-2M8 5a2 2 0 012-2h2a2 2 0 012 2m0 0h2a2 2 0 012 2v3m2 4H10m0 0l3-3m-3 3l3 3" /></svg>
+                          </button>
+                        </div>
+                      )}
+                    </div>
+
+                    <div>
+                      <div className="flex items-center justify-between mb-4">
+                        <h4 className="text-[10px] font-black text-gray-400 uppercase tracking-[0.4em]">AI Follow-up</h4>
+                        {aiActive ? (
+                          <button onClick={() => generateStarters(selectedContact)} disabled={isGenerating} className="text-indigo-600 text-[10px] font-black uppercase tracking-widest hover:underline disabled:opacity-50 px-4 py-2 bg-white/40 rounded-full border border-white">
+                            {isGenerating ? 'Analyzing...' : 'Refresh'}
+                          </button>
+                        ) : (
+                          <span className="text-[9px] font-bold text-amber-600 uppercase tracking-widest bg-amber-50 px-3 py-1 rounded-full border border-amber-100">AI Offline</span>
+                        )}
+                      </div>
+                      <div className="space-y-6">
+                        {starters.length > 0 ? (
+                          starters.map((starter, i) => (<div key={i} className="bg-indigo-600 text-white p-6 rounded-[28px] text-lg font-bold shadow-xl shadow-indigo-100/50 animate-in slide-in-from-right-4">"{starter}"</div>))
+                        ) : (
+                          <div className="bg-white/30 p-10 rounded-[40px] text-center border border-dashed border-white">
+                            <p className="text-gray-400 font-bold uppercase tracking-widest text-[10px] leading-relaxed max-w-[200px] mx-auto">
+                              {aiActive ? 'Tap refresh to generate AI conversation starters based on your notes.' : 'Conversation starters require an active AI connection.'}
+                            </p>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      <AIImportModal 
+        isOpen={isAIImporting} 
+        onClose={() => setIsAIImporting(false)} 
+        onImport={handleAIImport} 
+        currentCity={userLocation}
+      />
+    </div>
+  );
+};
+
+export default NetworkList;

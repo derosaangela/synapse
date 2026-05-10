@@ -1,0 +1,100 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 0. Default Deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- Helpers ---
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isVerified() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    // --- Validation Helpers ---
+
+    function isValidUser(data) {
+      return data.keys().hasAll(['uid', 'email']) &&
+             data.uid == request.auth.uid &&
+             data.email is string && data.email.size() <= 200;
+    }
+
+    function isValidCompany(data) {
+      return data.keys().hasAll(['id', 'name', 'ownerId']) &&
+             data.id is string && data.id.size() <= 100 &&
+             data.name is string && data.name.size() <= 200 &&
+             data.ownerId == request.auth.uid &&
+             (!('industry' in data) || (data.industry is string && data.industry.size() <= 100)) &&
+             (!('description' in data) || (data.description is string && data.description.size() <= 2000)) &&
+             (!('website' in data) || (data.website is string && data.website.size() <= 500));
+    }
+
+    function isValidContact(data) {
+      return data.keys().hasAll(['id', 'name', 'ownerId']) &&
+             data.id is string && data.id.size() <= 100 &&
+             data.name is string && data.name.size() <= 200 &&
+             data.ownerId == request.auth.uid &&
+             (!('email' in data) || (data.email is string && data.email.size() <= 200)) &&
+             (!('notes' in data) || (data.notes is string && data.notes.size() <= 5000));
+    }
+
+    function isValidFeedback(data) {
+      return data.keys().hasAll(['id', 'text', 'userId']) &&
+             data.id is string && data.id.size() <= 100 &&
+             data.text is string && data.text.size() <= 5000 &&
+             data.userId == request.auth.uid;
+    }
+
+    // --- Rules ---
+
+    match /users/{userId} {
+      allow get: if isOwner(userId);
+      allow create: if isOwner(userId) && isValidUser(incoming());
+      allow update: if isOwner(userId) && isValidUser(incoming()) && 
+                    incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'photoURL', 'updatedAt']);
+
+      match /companies/{companyId} {
+        allow list: if isOwner(userId);
+        allow get: if isOwner(userId);
+        allow create: if isOwner(userId) && isValidId(companyId) && isValidCompany(incoming());
+        allow update: if isOwner(userId) && isValidCompany(incoming()) && 
+                      incoming().ownerId == existing().ownerId;
+        allow delete: if isOwner(userId);
+      }
+
+      match /network/{contactId} {
+        allow list: if isOwner(userId);
+        allow get: if isOwner(userId);
+        allow create: if isOwner(userId) && isValidId(contactId) && isValidContact(incoming());
+        allow update: if isOwner(userId) && isValidContact(incoming()) && 
+                      incoming().ownerId == existing().ownerId;
+        allow delete: if isOwner(userId);
+      }
+    }
+
+    match /feedback/{feedbackId} {
+      allow create: if isSignedIn() && isValidId(feedbackId) && isValidFeedback(incoming());
+      // Only admins should read feedback, but for now we'll just allow creation
+    }
+  }
+}

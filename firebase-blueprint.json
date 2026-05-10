@@ -1,0 +1,99 @@
+{
+  "entities": {
+    "User": {
+      "title": "User Profile",
+      "description": "User account information",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "email": { "type": "string" },
+        "displayName": { "type": "string" },
+        "photoURL": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "email"]
+    },
+    "Company": {
+      "title": "Company",
+      "description": "A company in the industry knowledge base",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "industry": { "type": "string" },
+        "description": { "type": "string" },
+        "website": { "type": "string" },
+        "careerWebsite": { "type": "string" },
+        "roles": { "type": "array" },
+        "teams": { "type": "array" },
+        "logo": { "type": "string" },
+        "stage": { "type": "string" },
+        "valuation": { "type": "number" },
+        "leadInvestor": { "type": "string" },
+        "businessModel": { "type": "string" },
+        "ownerId": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "name", "ownerId"]
+    },
+    "Contact": {
+      "title": "Contact",
+      "description": "A professional network connection",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "companyId": { "type": "string" },
+        "location": { "type": "string" },
+        "tags": { "type": "array" },
+        "howMet": { "type": "string" },
+        "commonalities": { "type": "string" },
+        "lastConversationYear": { "type": "number" },
+        "lastConversationMonth": { "type": "number" },
+        "lastConversationDay": { "type": "number" },
+        "lastConversation": { "type": "string" },
+        "notes": { "type": "string" },
+        "email": { "type": "string" },
+        "linkedin": { "type": "string" },
+        "cadence": { "type": "number" },
+        "ownerId": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "name", "ownerId"]
+    },
+    "Feedback": {
+      "title": "Feedback",
+      "description": "User feedback about the application",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "text": { "type": "string" },
+        "rating": { "type": "number" },
+        "userId": { "type": "string" },
+        "userEmail": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "text", "userId"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "User profile document"
+    },
+    "/users/{userId}/companies/{companyId}": {
+      "schema": "Company",
+      "description": "User's tracked companies"
+    },
+    "/users/{userId}/network/{contactId}": {
+      "schema": "Contact",
+      "description": "User's network contacts"
+    },
+    "/feedback/{feedbackId}": {
+      "schema": "Feedback",
+      "description": "Global feedback collection"
+    }
+  }
+}
